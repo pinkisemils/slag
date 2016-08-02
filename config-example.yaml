@@ -1,0 +1,15 @@
+irc:
+    address: "127.0.0.1:6667"
+    nick: test
+    user: test
+    channels:
+        "#test":
+            target_chan: test
+            ignored_nicks: []
+
+slack:
+    channels:
+        eptvai:
+            target_chan: general
+    secret: slack_token
+

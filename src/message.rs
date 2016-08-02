@@ -1,11 +1,12 @@
-use std::collections::HashSet;
-use std::sync::mpsc::channel;
-use slack;
-
-pub enum Msg {
-    SlackMsg(String, String),
-    Shutdown(String),
-    SlackError(slack::Error)
+#[derive(Debug)]
+pub struct TransMsg {
+    pub chan: String,
+    pub text: String,
 }
 
-
+#[derive(Debug)]
+pub enum Msg {
+    TranMsg(TransMsg),
+    ResetIrc,
+    Shutdown,
+}
