@@ -8,6 +8,7 @@ extern crate pircolate;
 extern crate tokio_core;
 extern crate tokio_pool;
 extern crate log4rs;
+extern crate slack_hook;
 
 #[macro_use]
 extern crate log;
@@ -27,7 +28,7 @@ use std::fs::File;
 use std::io::Read;
 use std::thread::sleep;
 
-use tokio_core::reactor::Core;
+use tokio_core::reactor::{Core,Handle};
 
 use futures::sync::mpsc;
 
@@ -39,6 +40,7 @@ mod errors;
 mod cfg;
 use slack_client::{SlackReceiver, SlackSender};
 use message::Msg;
+use errors::SlagErr;
 
 fn main() {
 
@@ -68,18 +70,24 @@ fn main() {
             }
         };
 
-    let slack_sender = load_slack_sink(slack_receive, slack_cfg);
+    let slack_sender = match load_slack_sink(slack_receive, slack_cfg, &ev.handle()){
+        Ok(s) => s,
+        Err(e) => {
+            error!("failed to load slack sender: {}", e.description());
+            return;
+        }
+    };
+    slack_sender.process(&ev.handle());
 
-    let irc_agent = match irc::IrcConn::from_cfg(irc_cfg, &mut ev, irc_receive, slack_send) {
+    let irc_agent = match irc::IrcConn::from_cfg(irc_cfg, &mut ev, slack_send) {
         Ok(i) => i,
         Err(e) => {
             error!("Failed to load slack: {}", e.description());
             return;
         }
     };
-    info!("waiting now");
     thread::spawn(move || cli.run(&mut slack_agent));
-    let res = ev.run(irc_agent.process());
+    let res = ev.run(irc::IrcConn::process(irc_agent, irc_receive));
     match res {
         Ok(()) => (),
         Err(e) => info!("failed with: {:?}", e),
@@ -97,13 +105,9 @@ fn load_slack_receiver(cfg: slack_client::SlackCfg,
     Ok((cli, slack_agent))
 }
 
-fn load_slack_sink(slack_sink: mpsc::Receiver<message::SlackMsg>, cfg: slack_client::SlackCfg) ->  SlackSender {
-    SlackSender::new(slack_sink, cfg)
+fn load_slack_sink(slack_sink: mpsc::Receiver<message::SlackMsg>, cfg: slack_client::SlackCfg, handle: &Handle) ->  Result<SlackSender, SlagErr> {
+    SlackSender::new(slack_sink, cfg, handle)
 }
-
-// fn load_irc(cfg: &config::Config) -> Result<irc::IrcConn, errors::SlagErr> {
-//
-// }
 
 fn get_config() -> Result<cfg::Cfg, errors::SlagErr> {
     let mut c = config::Config::new();

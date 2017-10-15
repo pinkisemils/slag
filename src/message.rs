@@ -13,6 +13,7 @@ pub enum Msg {
     Shutdown,
 }
 
+#[derive(Debug)]
 pub enum SlackMsg {
     OutMsg(PrivMsg),
     Shutdown,

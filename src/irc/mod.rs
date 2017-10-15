@@ -19,6 +19,7 @@ use config::Config;
 use pircolate::message::client as client_msg;
 use pircolate::message::Message as irc_msg;
 use pircolate::command as irc_cmd;
+use pircolate::message::client::priv_msg;
 
 
 use tokio_irc_client::Client;
@@ -53,14 +54,13 @@ pub struct IrcCfg {
 pub struct IrcConn {
     cfg: IrcCfg,
     handle: ReactorHandle,
-    in_stream: mpsc::Receiver<Msg>,
+    slack_sink: mpsc::Sender<SlackMsg>,
     sink: stream::SplitSink<IrcTransport<TcpStream>>,
 }
 
 impl IrcConn {
     pub fn from_cfg(cfg: IrcCfg,
                     core: &mut Core,
-                    cmd_chan: mpsc::Receiver<Msg>,
                     slack_chan: mpsc::Sender<SlackMsg>)
                     -> Result<IrcConn, SlagErr> {
 
@@ -91,17 +91,31 @@ impl IrcConn {
 
         Ok(IrcConn {
             cfg: cfg,
-            in_stream: cmd_chan,
             handle: core.handle(),
             sink: irc_tx,
+            slack_sink: slack_chan,
         })
     }
 
-    pub fn process(self) -> Box<Future<Item = (), Error = ()>> {
-        self.in_stream
-            .for_each(|msg| Ok(()))
-            .map_err(|_| ())
-            .boxed()
+    pub fn process(conn: IrcConn , in_stream: mpsc::Receiver<Msg>) -> Box<Future<Item = (), Error = ()>> {
+        Box::new(in_stream
+                 .for_each(move |msg| {
+                     match msg {
+                         Msg::IrcInMsg(pmsg) => {
+                             conn.slack_sink.send(SlackMsg::OutMsg(pmsg));
+                         }
+                         _ => (),
+                         Msg::IrcOutMsg(pmsg) => {
+                             if let Ok(m) = priv_msg(&pmsg.chan, &format!("[{}]: {}", pmsg.nick, pmsg.msg)) {
+                                 conn.sink.send(m);
+                             }
+                         },
+
+                     };
+
+                     return Ok(());
+                 })
+            .map_err(|_| ()))
     }
 }
 

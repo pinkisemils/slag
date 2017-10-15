@@ -1,4 +1,5 @@
 use slack;
+use slack_hook;
 use pircolate;
 use config;
 use tokio_irc_client;
@@ -11,6 +12,8 @@ error_chain!{
     links {
         Pircolate(pircolate::error::Error, pircolate::error::ErrorKind);
         TokioIrc(tokio_irc_client::error::Error, tokio_irc_client::error::ErrorKind);
+        SlackHook(slack_hook::error::Error,slack_hook::error::ErrorKind);
+
     }
 
     foreign_links {

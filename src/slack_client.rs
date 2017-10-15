@@ -8,14 +8,20 @@ use std::fmt;
 use errors::SlagErr;
 
 use futures::sync::mpsc::{Receiver, Sender, SendError};
-use futures::Sink;
-use message::{TransMsg, Msg};
+use futures::{Sink,Stream};
+
+use message::{TransMsg, Msg, SlackMsg};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use tokio_core::reactor;
+use futures;
+use slack_hook::{Slack,PayloadBuilder};
 
 #[derive(Deserialize,Serialize,Clone)]
 pub struct SlackCfg {
     pub secret: String,
+    pub hook_url: String,
+    pub channel_map: HashMap<String, String>,
 }
 
 
@@ -107,16 +113,46 @@ impl slack::EventHandler for SlackReceiver {
 }
 
 pub struct SlackSender {
-    sink: Receiver<message::SlackMsg>,
+    sink: Receiver<SlackMsg>,
     cfg: SlackCfg,
+    slack: Slack,
 }
 
 impl SlackSender {
-    pub fn new (sink: Receiver<message::SlackMsg>, cfg: SlackCfg) ->  SlackSender {
-        SlackSender {
+    pub fn new (sink: Receiver<message::SlackMsg>, cfg: SlackCfg, handle: &reactor::Handle) ->  Result<SlackSender, SlagErr> {
+        let slack = Slack::new(cfg.hook_url.as_str(), handle)?;
+        Ok(SlackSender {
             sink: sink,
             cfg: cfg,
-        }
+            slack: slack,
+        })
 
+    }
+
+    pub fn process(self, handle: &reactor::Handle) {
+        let SlackSender{sink, cfg, slack }= self;
+        let work = sink.filter_map(move |m| {
+            match m {
+                SlackMsg::OutMsg(pmsg) => {
+                    if let Ok(p) = PayloadBuilder::new()
+                        .text(pmsg.msg.clone())
+                        .channel("#general")
+                        .username(pmsg.nick.clone())
+                        .build() {
+                            Some(slack.send(&p))
+                        } else {
+                            error!("failed to construct a slack message from {:?}", pmsg);
+                            None
+                        }
+                }
+                _ => None
+            }
+        }).then(|res| {
+            if let Err(e) = res {
+                error!("failed to send message to slack: {:?}", e);
+            };
+            Ok(())
+        }).for_each(|_| Ok(()));
+        handle.spawn(work);
     }
 }
