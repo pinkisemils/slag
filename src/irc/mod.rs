@@ -22,9 +22,12 @@ use pircolate::command as irc_cmd;
 
 
 use tokio_irc_client::Client;
+use tokio_irc_client::client::IrcTransport;
 use tokio_irc_client::error as irc_err;
 
-use message::Msg;
+use tokio_core::net::TcpStream;
+
+use message::{Msg, PrivMsg, SlackMsg};
 use errors::{SlagErr, SlagResult};
 
 
@@ -51,13 +54,14 @@ pub struct IrcConn {
     cfg: IrcCfg,
     handle: ReactorHandle,
     in_stream: mpsc::Receiver<Msg>,
+    sink: stream::SplitSink<IrcTransport<TcpStream>>,
 }
 
 impl IrcConn {
     pub fn from_cfg(cfg: IrcCfg,
                     core: &mut Core,
                     cmd_chan: mpsc::Receiver<Msg>,
-                    slack_chan: mpsc::Sender<Msg>)
+                    slack_chan: mpsc::Sender<SlackMsg>)
                     -> Result<IrcConn, SlagErr> {
 
         let mut connect_seq = vec![
@@ -77,7 +81,7 @@ impl IrcConn {
         let incoming_messages = irc_rx.for_each(|message| {
                 match try_priv_msg(&message) {
                     Some(pmsg) => info!("received real msg {:?}", pmsg),
-                    None=> info!("Received something {:?}", message)
+                    None => info!("Received something {:?}", message),
                 };
                 Ok(())
             })
@@ -89,31 +93,31 @@ impl IrcConn {
             cfg: cfg,
             in_stream: cmd_chan,
             handle: core.handle(),
+            sink: irc_tx,
         })
     }
 
     pub fn process(self) -> Box<Future<Item = (), Error = ()>> {
         self.in_stream
-            .for_each(|msg| {
-                Ok(())
-            })
+            .for_each(|msg| Ok(()))
             .map_err(|_| ())
             .boxed()
     }
 }
 
-#[derive(Debug)]
-struct priv_msg {
-    pub nick: String,
-    pub msg: String,
-    pub chan: String,
-}
-
-fn try_priv_msg(irc_msg: &irc_msg) -> Option<priv_msg> {
+fn try_priv_msg(irc_msg: &irc_msg) -> Option<PrivMsg> {
     if let Some(pmsg) = irc_msg.command::<irc_cmd::PrivMsg>() {
         let irc_cmd::PrivMsg(chan, msg) = pmsg;
         if let Some((nick, _, _)) = irc_msg.prefix() {
-            Some(priv_msg{nick: nick.to_string(), chan: chan.to_string(), msg:msg.to_string()})
-        } else { None }
-    } else { None }
+            Some(PrivMsg {
+                nick: nick.to_string(),
+                chan: chan.to_string(),
+                msg: msg.to_string(),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }

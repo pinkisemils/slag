@@ -9,9 +9,12 @@ extern crate tokio_core;
 extern crate tokio_pool;
 extern crate log4rs;
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate error_chain;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate error_chain;
+#[macro_use]
+extern crate serde_derive;
 
 
 use std::path::Path;
@@ -34,12 +37,13 @@ mod irc;
 mod message;
 mod errors;
 mod cfg;
-use slack_client::SlackReceiver;
+use slack_client::{SlackReceiver, SlackSender};
 use message::Msg;
 
 fn main() {
 
-    log4rs::init_file("config/log4rs.yml", Default::default()).expect("Couldn't open logging config file");
+    log4rs::init_file("config/log4rs.yml", Default::default())
+        .expect("Couldn't open logging config file");
 
     let mut ev = Core::new().unwrap();
 
@@ -53,39 +57,53 @@ fn main() {
         }
     };
 
-    let cfg::Cfg{irc_cfg, slack_cfg} = cfg;
+    let cfg::Cfg { irc_cfg, slack_cfg } = cfg;
 
-    let (mut cli, mut slack_agent) = match load_slack(slack_cfg, irc_send) {
-        Ok(slack) => slack,
-        Err(e) => {
-            println!("Failed to load slack: {}", e.description());
-            return;
-        }
-    };
+    let (mut cli, mut slack_agent) =
+        match load_slack_receiver(slack_cfg.clone(), irc_send) {
+            Ok(slack) => slack,
+            Err(e) => {
+                println!("Failed to load slack: {}", e.description());
+                return;
+            }
+        };
+
+    let slack_sender = load_slack_sink(slack_receive, slack_cfg);
 
     let irc_agent = match irc::IrcConn::from_cfg(irc_cfg, &mut ev, irc_receive, slack_send) {
         Ok(i) => i,
         Err(e) => {
-            println!("Failed to load slack: {}", e.description());
+            error!("Failed to load slack: {}", e.description());
             return;
         }
     };
     info!("waiting now");
     thread::spawn(move || cli.run(&mut slack_agent));
-    ev.run(irc_agent.process());
+    let res = ev.run(irc_agent.process());
+    match res {
+        Ok(()) => (),
+        Err(e) => info!("failed with: {:?}", e),
+    }
 
 
 }
 
-fn load_slack(cfg: slack_client::SlackCfg, irc_stream: mpsc::Sender<Msg>) -> Result<(slack::RtmClient, SlackReceiver), errors::SlagErr> {
-    let mut cli = slack::RtmClient::login(&cfg.secret.clone())?;
-    let slack_agent = SlackReceiver::new(cfg, irc_stream);
+fn load_slack_receiver(cfg: slack_client::SlackCfg,
+              irc_stream: mpsc::Sender<Msg>,
+              )
+              -> Result<(slack::RtmClient, SlackReceiver), errors::SlagErr> {
+    let cli = slack::RtmClient::login(&cfg.secret.clone())?;
+    let slack_agent = SlackReceiver::new(cfg, irc_stream, &cli);
     Ok((cli, slack_agent))
 }
 
-//fn load_irc(cfg: &config::Config) -> Result<irc::IrcConn, errors::SlagErr> {
+fn load_slack_sink(slack_sink: mpsc::Receiver<message::SlackMsg>, cfg: slack_client::SlackCfg) ->  SlackSender {
+    SlackSender::new(slack_sink, cfg)
+}
+
+// fn load_irc(cfg: &config::Config) -> Result<irc::IrcConn, errors::SlagErr> {
 //
-//}
+// }
 
 fn get_config() -> Result<cfg::Cfg, errors::SlagErr> {
     let mut c = config::Config::new();
@@ -93,4 +111,3 @@ fn get_config() -> Result<cfg::Cfg, errors::SlagErr> {
     let cfg = c.try_into()?;
     Ok(cfg)
 }
-

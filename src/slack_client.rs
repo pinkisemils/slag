@@ -1,3 +1,4 @@
+use slack_api;
 use slack;
 use slack::{Event, Message};
 use slack::api::channels::{ListRequest, list as list_channels};
@@ -6,13 +7,13 @@ use std::fmt;
 
 use errors::SlagErr;
 
-use futures::sync::mpsc::{Sender, SendError};
+use futures::sync::mpsc::{Receiver, Sender, SendError};
 use futures::Sink;
 use message::{TransMsg, Msg};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 
-#[derive(Deserialize,Serialize)]
+#[derive(Deserialize,Serialize,Clone)]
 pub struct SlackCfg {
     pub secret: String,
 }
@@ -26,8 +27,42 @@ pub struct SlackReceiver {
     channels: HashMap<String, String>,
 }
 
+fn unwrap_chan(chan: &slack_api::Channel) -> Option<(String, String)> {
+    None
+
+}
+
+fn unwrap_user(usr: &slack_api::User) -> Option<(String, String)> {
+    None
+}
+
 impl SlackReceiver {
-    pub fn new(cfg: SlackCfg, irc_chan: Sender<message::Msg>) -> SlackReceiver {
+    pub fn new(cfg: SlackCfg,
+               irc_chan: Sender<message::Msg>,
+               cli: &slack::RtmClient)
+               -> SlackReceiver {
+        let mut nicks = HashMap::new();
+        let mut channels = HashMap::new();
+        let resp = cli.start_response();
+        resp
+            .channels
+            .as_ref()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(unwrap_chan)
+            .for_each(|(id, name)| {
+                channels.insert(id, name);
+            });
+        resp
+            .users
+            .as_ref()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(unwrap_user)
+            .for_each(|(id, name)| {
+                nicks.insert(id, name);
+            });
+
         SlackReceiver {
             irc_chan: irc_chan,
             cfg: cfg,
@@ -68,13 +103,20 @@ impl slack::EventHandler for SlackReceiver {
 
     fn on_connect(&mut self, client: &slack::RtmClient) {
         debug!("Just joined, available channels are:");
-        //    match client.list_channels() {
-        //        Ok(chans) => {
-        //            for chan in chans {
-        //                debug!("chan: {:?}", chan);
-        //            }
-        //        }
-        //        Err(e) => debug!("Failed to list channels because of error {}", e),
-        //    }
+    }
+}
+
+pub struct SlackSender {
+    sink: Receiver<message::SlackMsg>,
+    cfg: SlackCfg,
+}
+
+impl SlackSender {
+    pub fn new (sink: Receiver<message::SlackMsg>, cfg: SlackCfg) ->  SlackSender {
+        SlackSender {
+            sink: sink,
+            cfg: cfg,
+        }
+
     }
 }

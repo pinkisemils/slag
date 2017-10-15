@@ -15,6 +15,7 @@ tokio-pool = "0.1.0"
 log = "0.3.7"
 slack = "0.18.0"
 slack_api = { version = "0.17.0", features = ["reqwest"]  }
+slack-hook = { git = "ssh://git@github.com/pinkisemils/rust-slack.git", branch = "async_sender"}
 error-chain = "0.10"
 serde_derive = "^1.0.8"
 serde = "^1.0.8"
