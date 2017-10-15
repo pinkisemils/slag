@@ -1,123 +1,344 @@
-use std::collections::{HashSet, HashMap};
-use std::marker::Sized;
-use std::path::Path;
-use std::time;
-use std::thread;
-use std::net;
-use std::io::Error as IoErr;
+use std::collections::{HashMap, HashSet};
+use std::default::Default;
+use std::error::Error;
+use std::mem::discriminant;
+use std::time::Duration;
 
-use tokio_core::reactor::Core;
-use tokio_core::reactor::Handle as ReactorHandle;
+use tokio_core::reactor;
 
-use futures::{Future, Sink, Stream, stream};
+use futures::{future, Future, Sink, Stream};
 use futures::sync::mpsc;
+use futures::sync::oneshot;
 
 
-use config::Config;
 
+use message::{PrivMsg, SlackMsg};
+use errors::{SlagErr, SlagErrKind};
 
-use pircolate::message::client as client_msg;
-use pircolate::message::Message as irc_msg;
-use pircolate::command as irc_cmd;
+use aatxe_irc;
+use aatxe_irc::client::data::Config as AatxeConfig;
+use aatxe_irc::client::{Client, IrcClient, PackedIrcClient};
+use aatxe_irc::proto::command::Command as AatxeCmd;
+use aatxe_irc::proto::message::Message as AatxeMsg;
+use aatxe_irc::client::ext::ClientExt;
+use tokio_timer::Timer;
 
-
-use tokio_irc_client::Client;
-use tokio_irc_client::client::IrcTransport;
-use tokio_irc_client::error as irc_err;
-
-use tokio_core::net::TcpStream;
-
-use message::{Msg, PrivMsg, SlackMsg};
-use errors::{SlagErr, SlagResult};
-
-
-pub struct TransMsg {
-    pub chan: String,
-    pub text: String,
-}
-
-#[derive(Deserialize,Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct IrcChan {
     ignored_nicks: HashSet<String>,
     target_chan: String,
 }
 
-#[derive(Deserialize,Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct IrcCfg {
-    address: net::SocketAddr,
+    host: String,
+    port: u16,
     nick: String,
     user: String,
-    channels: HashMap<String, IrcChan>,
+    #[serde(skip)] pub channels: HashMap<String, String>,
 }
 
-pub struct IrcConn {
-    cfg: IrcCfg,
-    handle: ReactorHandle,
-    in_stream: mpsc::Receiver<Msg>,
-    sink: stream::SplitSink<IrcTransport<TcpStream>>,
+#[derive(Debug)]
+enum IrcOutMsg {
+    FromSlack(SlackMsg),
+    SenderShutdown,
 }
 
-impl IrcConn {
-    pub fn from_cfg(cfg: IrcCfg,
-                    core: &mut Core,
-                    cmd_chan: mpsc::Receiver<Msg>,
-                    slack_chan: mpsc::Sender<SlackMsg>)
-                    -> Result<IrcConn, SlagErr> {
-
-        let mut connect_seq = vec![
-            client_msg::nick(&cfg.nick),
-            client_msg::user(&cfg.user, "IRC to Slack bridge"),
-        ];
-        connect_seq.extend(cfg.channels
-            .iter()
-            .map(|(chan_name, _)| client_msg::join(&chan_name, None)));
-
-        let client = Client::new(cfg.address)
-            .connect(&core.handle())
-            .and_then(|c| c.send_all(stream::iter(connect_seq)))
-            .and_then(|(c, _)| Ok(c.split()));
-        let (irc_tx, irc_rx) = core.run(client)?;
-
-        let incoming_messages = irc_rx.for_each(|message| {
-                match try_priv_msg(&message) {
-                    Some(pmsg) => info!("received real msg {:?}", pmsg),
-                    None => info!("Received something {:?}", message),
-                };
-                Ok(())
-            })
-            .map_err(|e| ());
-        core.handle().spawn(incoming_messages);
-
-
-        Ok(IrcConn {
-            cfg: cfg,
-            in_stream: cmd_chan,
-            handle: core.handle(),
-            sink: irc_tx,
-        })
-    }
-
-    pub fn process(self) -> Box<Future<Item = (), Error = ()>> {
-        self.in_stream
-            .for_each(|msg| Ok(()))
-            .map_err(|_| ())
-            .boxed()
-    }
+#[derive(Debug)]
+pub enum IrcFailure {
+    Disconnect,
+    Error(String),
+    Connection(aatxe_irc::error::IrcError),
+    BadConf(aatxe_irc::error::IrcError),
+    CantIdentify(aatxe_irc::error::IrcError),
+    Shutdown,
 }
 
-fn try_priv_msg(irc_msg: &irc_msg) -> Option<PrivMsg> {
-    if let Some(pmsg) = irc_msg.command::<irc_cmd::PrivMsg>() {
-        let irc_cmd::PrivMsg(chan, msg) = pmsg;
-        if let Some((nick, _, _)) = irc_msg.prefix() {
-            Some(PrivMsg {
-                nick: nick.to_string(),
-                chan: chan.to_string(),
-                msg: msg.to_string(),
-            })
-        } else {
-            None
+enum ConnResult {
+    Recoverable(mpsc::Receiver<IrcOutMsg>, IrcFailure),
+    Shutdown,
+}
+
+impl IrcCfg {
+    fn conn_from_cfg(&self) -> AatxeConfig {
+        AatxeConfig {
+            nickname: Some(self.nick.clone()),
+            server: Some(self.host.clone()),
+            port: Some(self.port),
+            channels: Some(self.channels.keys().cloned().collect()),
+            use_ssl: Some(false),
+            ping_time: Some(5),
+            ping_timeout: Some(5),
+            ..Default::default()
         }
-    } else {
-        None
     }
+
+    // TODO: consider futurizing this function
+    fn run_once(
+        &mut self,
+        core: &mut reactor::Core,
+        shutdown_chan: mpsc::Sender<IrcOutMsg>,
+        in_stream: mpsc::Receiver<IrcOutMsg>,
+        mut slack_chan: &mut mpsc::Sender<SlackMsg>,
+    ) -> ConnResult {
+        let cfg = self.conn_from_cfg();
+
+        let future = match IrcClient::new_future(core.handle(), &cfg) {
+            Ok(f) => f,
+            Err(e) => return ConnResult::Recoverable(in_stream, IrcFailure::BadConf(e)),
+        };
+
+        // immediate connection errors (like no internet) will turn up here...
+        let client = match core.run(future) {
+            Ok(c) => c,
+            Err(e) => return ConnResult::Recoverable(in_stream, IrcFailure::Connection(e)),
+        };
+        let PackedIrcClient(client, inner_fut) = client;
+        let inner_fut = inner_fut.map_err(|_| {
+            ()
+        });
+
+        core.handle().spawn(inner_fut);
+
+        // TODO handle this
+        let res = client.identify();
+        if let Err(e) = res {
+            return ConnResult::Recoverable(in_stream, IrcFailure::CantIdentify(e));
+        }
+
+        let sender = client.clone();
+        // runtime errors (like disconnections and so forth) will turn up here...
+
+        let (sender_tx, sender_join) = oneshot::channel();
+        let slack_sender = consume_sender(in_stream, sender)
+            .then(|res| sender_tx.send(res))
+            .map_err(|_| ());
+
+        core.handle().spawn(slack_sender);
+
+
+
+        let work = client
+            .stream()
+            // errors here mean a disconnection
+            .map_err(|_| IrcFailure::Disconnect)
+            .filter_map(handle_irc_msg)
+            .for_each(|msg| match msg {
+                Incoming::ForwardMsg(m) => {
+                    try_send_to_slack(&mut slack_chan, m);
+                    Ok(())
+                }
+                Incoming::Error(e) => Err(IrcFailure::Error(e)),
+            })
+            .then(|res: Result<(), IrcFailure>| {
+                shutdown_chan.send(IrcOutMsg::SenderShutdown)
+                    .then(|_| res)
+            });
+
+        info!("connected to IRC");
+        let recv_err = core.run(work).err().unwrap_or(IrcFailure::Disconnect);
+        let send_res = core.run(sender_join).unwrap();
+        // If the sender errors, then slack has stopped sending messages.
+        // This means that the gateway is shutting down.
+        match send_res {
+            Err(IrcFailure::Shutdown) => ConnResult::Shutdown,
+            Err(_) => unreachable!(),
+            Ok(slack_pipe) => ConnResult::Recoverable(slack_pipe, recv_err),
+        }
+        // unwrapping a future that is never cancelled
+    }
+
+
+    // TODO consider futurizing this function
+    pub fn run(
+        &mut self,
+        core: &mut reactor::Core,
+        in_stream: mpsc::Receiver<SlackMsg>,
+        slack_chan: &mut mpsc::Sender<SlackMsg>,
+    ) -> Result<(), SlagErr> {
+        let (sink_in, mut sink_out) = mpsc::channel(32);
+        let slack_msgs = in_stream.map(|m| IrcOutMsg::FromSlack(m)).map_err(|_| ());
+
+        let slack_pipe = sink_in
+            .clone()
+            .sink_map_err(|_| ())
+            .send_all(slack_msgs)
+            .then(|_| Ok(()));
+        core.handle().spawn(slack_pipe);
+
+        let mut err_state = ErrState::new();
+        let timer = Timer::default();
+
+        loop {
+            match self.run_once(core, sink_in.clone(), sink_out, slack_chan) {
+                ConnResult::Recoverable(slack_chan, err) => {
+                    info!("got irc err- {:?}", err);
+                    sink_out = slack_chan;
+                    match err_state.handle_error(err) {
+                        ErrResolution::Die(e) => {
+                            return Err(SlagErrKind::IrcError(e).into());
+                        },
+                        ErrResolution::Backoff(0) => continue,
+                        ErrResolution::Backoff(time) => {
+                            let sleep = timer.sleep(Duration::from_secs(time));
+                            core.run(sleep).expect("failed to sleep");
+                            info!("trying to reconnect to IRC");
+                            continue
+                        }
+                    }
+                }
+                ConnResult::Shutdown => {
+                    return Ok(());
+                }
+            };
+        }
+    }
+}
+
+struct ErrState {
+    err: Option<IrcFailure>,
+    occurence: u32,
+}
+
+enum ErrResolution {
+    Backoff(u64),
+    Die(IrcFailure),
+}
+
+
+// Deals with backoff periods
+impl ErrState {
+    fn new() -> ErrState {
+        ErrState{ err: None, occurence: 0 }
+    }
+
+    // returns None if error is fatal
+    // Returns Some(backoff) to backoff for a certain amount of time
+    pub fn handle_error(&mut self, err: IrcFailure) -> ErrResolution {
+        match &err {
+            &IrcFailure::Disconnect  => self.set_err(err),
+            &IrcFailure::Connection(_) => self.set_err(err),
+            &IrcFailure::BadConf(_) => ErrResolution::Die(err),
+            &IrcFailure::Error(_) => ErrResolution::Die(err),
+            &IrcFailure::CantIdentify(_) => ErrResolution::Die(err),
+            &IrcFailure::Shutdown => ErrResolution::Die(err),
+
+        }
+    }
+
+    fn set_err(&mut self, err: IrcFailure) -> ErrResolution {
+        let errors_are_same = self.err.as_ref()
+            .map(|prev_err| discriminant(&err) == discriminant(&prev_err)).
+            unwrap_or(false);
+        if !errors_are_same {
+            self.occurence = 0;
+            self.err = Some(err);
+            ErrResolution::Backoff(0)
+        } else {
+            self.occurence += 1;
+            ErrResolution::Backoff((2 as u64).pow(self.occurence - 1 ))
+        }
+    }
+}
+
+
+
+
+
+// A recursive future that will send messages from output_stream until it runs out or
+// output_stream delivers an IrcOutMsg::SenderShutdown.
+fn consume_sender(
+    output_stream: mpsc::Receiver<IrcOutMsg>,
+    sender: IrcClient,
+) -> Box<Future<Item = mpsc::Receiver<IrcOutMsg>, Error = IrcFailure> + Send> {
+    let next = output_stream.into_future();
+    next.then(|res| {
+        let (msg, stream) = res.unwrap();
+        let msg = match msg {
+            Some(m) => m,
+            None => {
+                // slack channel down
+                return future::err(IrcFailure::Shutdown).boxed();
+            }
+        };
+        let msg = match msg {
+            IrcOutMsg::SenderShutdown => {
+                return future::ok(stream).boxed();
+            }
+            IrcOutMsg::FromSlack(m) => m,
+        };
+
+        let msg = match handle_slack_msg(msg) {
+            None => {
+                return consume_sender(stream, sender);
+            }
+            Some(m) => m,
+        };
+
+        match sender.send(msg) {
+            Ok(_) => consume_sender(stream, sender),
+            Err(e) => {
+                error!("encountered error sending to irc: {:?}", e);
+                consume_sender(stream, sender)
+            }
+        }
+    }).boxed()
+}
+
+fn try_send_to_slack(chan: &mut mpsc::Sender<SlackMsg>, slack_msg: SlackMsg) {
+    if let Err(e) = chan.try_send(slack_msg) {
+        let desc = e.description().to_string();
+        let dropped_message = e.into_inner();
+        error!(
+            "dropped message '{:?}' when sending to slack: {}",
+            dropped_message,
+            desc
+        );
+    }
+}
+
+#[derive(Debug)]
+enum Incoming {
+    ForwardMsg(SlackMsg),
+    //Kick(String),
+    Error(String),
+}
+
+
+fn handle_irc_msg(irc_msg: AatxeMsg) -> Option<Incoming> {
+    let nick = irc_msg.source_nickname()?.to_string();
+    let cmd = irc_msg.command;
+    match cmd {
+        AatxeCmd::PRIVMSG(target, msg) => Some(handle_privmsg(nick, target, msg)),
+        //AatxeCmd::KICK(chans, users, comment) =>
+        AatxeCmd::ERROR(err_message) => Some(Incoming::Error(err_message)),
+        _ => None,
+    }
+}
+
+
+fn handle_privmsg(nick: String, target: String, msg: String) -> Incoming {
+    Incoming::ForwardMsg(SlackMsg::OutMsg(PrivMsg {
+        chan: target,
+        msg: msg,
+        nick: nick,
+    }))
+}
+
+fn handle_slack_msg(slack_msg: SlackMsg) -> Option<AatxeCmd> {
+    match slack_msg {
+        SlackMsg::OutMsg(m) => try_format_out_msg(m),
+        SlackMsg::StatusMsg(m) => try_format_status_msg(m),
+    }
+}
+
+fn try_format_out_msg(m: PrivMsg) -> Option<AatxeCmd> {
+    Some(AatxeCmd::PRIVMSG(
+        m.chan,
+        format!("[{}]: {}", m.nick, m.msg),
+    ))
+}
+
+fn try_format_status_msg(m: PrivMsg) -> Option<AatxeCmd> {
+    Some(AatxeCmd::PRIVMSG(m.chan, m.msg))
 }

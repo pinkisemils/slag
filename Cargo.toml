@@ -4,22 +4,24 @@ version = "0.1.0"
 authors = ["Emīls Piņķis <pinkisemils@gmail.com>"]
 
 [dependencies]
-tokio-irc-client = "0.2.1"
+config = "0.7"
+error-chain = "0.10"
 futures = "0.1"
+irc = "0.13"
+log = "0.3.7"
+native-tls = "0.1"
+pircolate = "0.2"
+serde = "^1.0.8"
+serde_derive = "^1.0.8"
+slack = "0.18.0"
+slack-hook = { git = "ssh://git@github.com/pinkisemils/rust-slack.git", branch = "async_sender"}
+slack_api = { version = "0.17.0", features = ["reqwest"]  }
 tokio-core = "0.1"
 tokio-io = "0.1"
-tokio-tls = "0.1"
-pircolate = "0.2"
-native-tls = "0.1"
+tokio-irc-client = "0.2.1"
 tokio-pool = "0.1.0"
-log = "0.3.7"
-slack = "0.18.0"
-slack_api = { version = "0.17.0", features = ["reqwest"]  }
-slack-hook = { git = "ssh://git@github.com/pinkisemils/rust-slack.git", branch = "async_sender"}
-error-chain = "0.10"
-serde_derive = "^1.0.8"
-serde = "^1.0.8"
-config = "0.7"
+tokio-timer = "0.1"
+tokio-tls = "0.1"
 
 [dependencies.log4rs]
 version = "0.4.8" 
