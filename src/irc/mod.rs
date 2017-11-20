@@ -29,7 +29,7 @@ use tokio_irc_client::error as irc_err;
 use tokio_core::net::TcpStream;
 
 use message::{Msg, PrivMsg, SlackMsg};
-use errors::{SlagErr, SlagResult};
+use errors::{SlagErrKind, SlagErr, SlagResult};
 
 
 pub struct TransMsg {
@@ -80,12 +80,14 @@ impl IrcConn {
 
         let incoming_messages = irc_rx.for_each(|message| {
                 match try_priv_msg(&message) {
-                    Some(pmsg) => info!("received real msg {:?}", pmsg),
+                    Some(pmsg) => {
+                        info!("received real msg {:?}", pmsg);
+                    }
                     None => info!("Received something {:?}", message),
                 };
                 Ok(())
             })
-            .map_err(|e| ());
+            .map_err(|_| ());
         core.handle().spawn(incoming_messages);
 
 
@@ -97,25 +99,27 @@ impl IrcConn {
         })
     }
 
-    pub fn process(conn: IrcConn , in_stream: mpsc::Receiver<Msg>) -> Box<Future<Item = (), Error = ()>> {
-        Box::new(in_stream
-                 .for_each(move |msg| {
-                     match msg {
-                         Msg::IrcInMsg(pmsg) => {
-                             conn.slack_sink.send(SlackMsg::OutMsg(pmsg));
-                         }
-                         _ => (),
-                         Msg::IrcOutMsg(pmsg) => {
-                             if let Ok(m) = priv_msg(&pmsg.chan, &format!("[{}]: {}", pmsg.nick, pmsg.msg)) {
-                                 conn.sink.send(m);
-                             }
-                         },
-
-                     };
-
-                     return Ok(());
-                 })
-            .map_err(|_| ()))
+    pub fn process(conn: IrcConn,
+                   in_stream: mpsc::Receiver<Msg>)
+                   -> Box<Future<Item = (), Error = SlagErr>> {
+        let slack_sink = conn.slack_sink.clone();
+        let work = in_stream.for_each(move |msg| {
+                match msg {
+                    Msg::IrcInMsg(pmsg) => {
+                        slack_sink.send(SlackMsg::OutMsg(pmsg));
+                    }
+                    _ => (),
+                    Msg::IrcOutMsg(pmsg) => {
+                        if let Ok(m) = priv_msg(&pmsg.chan,
+                                                &format!("[{}]: {}", pmsg.nick, pmsg.msg)) {
+                            conn.sink.send(m);
+                        }
+                    }
+                };
+                return Ok(());
+            })
+            .map_err(|_| SlagErr::from(SlagErrKind::InvalidErr("ayy lmau".to_string())));
+        Box::new(work)
     }
 }
 
