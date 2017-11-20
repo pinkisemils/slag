@@ -79,7 +79,7 @@ fn main() {
     };
     slack_sender.process(&ev.handle());
 
-    let irc_agent = match irc::IrcConn::from_cfg(irc_cfg, &mut ev, slack_send) {
+    match irc::IrcConn::from_cfg(irc_cfg, &mut ev, irc_receive, slack_send) {
         Ok(i) => i,
         Err(e) => {
             error!("Failed to load slack: {}", e.description());
@@ -87,17 +87,15 @@ fn main() {
         }
     };
     thread::spawn(move || cli.run(&mut slack_agent));
-    let res = ev.run(irc::IrcConn::process(irc_agent, irc_receive));
-    match res {
-        Ok(()) => (),
-        Err(e) => info!("failed with: {:?}", e),
+    // cranking the event loop
+    loop {
+        ev.turn(None)
     }
-
-
+    
 }
 
 fn load_slack_receiver(cfg: slack_client::SlackCfg,
-              irc_stream: mpsc::Sender<Msg>,
+              irc_stream: mpsc::Sender<message::PrivMsg>,
               )
               -> Result<(slack::RtmClient, SlackReceiver), errors::SlagErr> {
     let cli = slack::RtmClient::login(&cfg.secret.clone())?;

@@ -3,18 +3,18 @@ use slack;
 use slack::{Event, Message};
 use slack::api::channels::{ListRequest, list as list_channels};
 use message;
-use std::fmt;
 
 use errors::SlagErr;
 
 use futures::sync::mpsc::{Receiver, Sender, SendError};
 use futures::{Sink,Stream};
 
-use message::{TransMsg, Msg, SlackMsg};
+use message::{TransMsg, PrivMsg, SlackMsg};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use tokio_core::reactor;
 use futures;
+use futures::Future;
 use slack_hook::{Slack,PayloadBuilder};
 
 #[derive(Deserialize,Serialize,Clone)]
@@ -26,7 +26,7 @@ pub struct SlackCfg {
 
 
 pub struct SlackReceiver {
-    irc_chan: Sender<message::Msg>,
+    irc_chan: Sender<message::PrivMsg>,
     cfg: SlackCfg,
     nicks: HashMap<String, String>,
     // maps channel IDs to channel names
@@ -44,7 +44,7 @@ fn unwrap_user(usr: &slack_api::User) -> Option<(String, String)> {
 
 impl SlackReceiver {
     pub fn new(cfg: SlackCfg,
-               irc_chan: Sender<message::Msg>,
+               irc_chan: Sender<message::PrivMsg>,
                cli: &slack::RtmClient)
                -> SlackReceiver {
         let mut nicks = HashMap::new();
@@ -77,11 +77,11 @@ impl SlackReceiver {
         }
     }
 
-    fn send_msg(&mut self, msg: Msg) {
+    fn send_irc_msg(&mut self, msg: PrivMsg) {
         match self.irc_chan.try_send(msg) {
             Ok(_) => (),
             Err(e) => warn!("Failed to send message to irc channel"),
-        }
+        };
     }
 
 
