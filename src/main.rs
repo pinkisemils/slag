@@ -1,3 +1,5 @@
+#![feature(conservative_impl_trait)]
+
 extern crate slack;
 extern crate slack_api;
 extern crate config;

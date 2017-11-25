@@ -101,14 +101,17 @@ impl IrcConn {
         let outgoing_messages = in_stream.filter_map(|pmsg| {
             if let Ok(m) = priv_msg(&pmsg.chan,
                                     &format!("[{}]: {}", pmsg.nick, pmsg.msg)) {
+                info!("received privmsg from slack!!!! -> {:?}", m);
                 Some(m)
             } else {
                 info!("failed to format {:?} for sending over IRC", pmsg);
                 None
             }
-        }).map_err(|e| IrcErr::from(IrcErrKind::Msg("message sender depleted".into())))
+        }).map_err(|_| IrcErr::from(IrcErrKind::Msg("message sender depleted".into())))
         .forward(irc_tx)
-        .map(|_| ())
+            .map(|_| {
+                ()
+            })
         .map_err(|e| {
             info!("stopping sending messages to irc because: {}", e);
             ()

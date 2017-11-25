@@ -3,6 +3,7 @@ use slack_hook;
 use pircolate;
 use config;
 use tokio_irc_client;
+use message::PrivMsg;
 
 error_chain!{
     types {
@@ -10,11 +11,15 @@ error_chain!{
     }
 
     errors {
-        InvalidErr(t: String) {
-            description("this is not expected")
-            display("context: '{}'", t)
+        CantQueuePrivMsg(t: PrivMsg) {
+            description("couldn't queue priv message")
+            display("dropped message: {}", t)
         }
 
+        InvalidErr(t: String) {
+            description("this is not expected")
+            display("context: '{:?}'", t)
+        }
     }
 
     links {
