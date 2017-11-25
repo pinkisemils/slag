@@ -1,9 +1,24 @@
 use std::fmt;
 
 #[derive(Debug)]
+pub struct TransMsg {
+    pub chan: String,
+    pub text: String,
+}
+
+#[derive(Debug)]
+pub enum Msg {
+    IrcInMsg(PrivMsg),
+    IrcOutMsg(PrivMsg),
+    TranMsg(TransMsg),
+    ResetIrc,
+    Shutdown,
+}
+
+#[derive(Debug)]
 pub enum SlackMsg {
     OutMsg(PrivMsg),
-    StatusMsg(PrivMsg),
+    Shutdown,
 }
 
 #[derive(Debug)]
