@@ -53,7 +53,7 @@ fn main() {
 
     let cfg::Cfg { irc_cfg, slack_cfg } = cfg;
 
-    let (cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
+    let (mut cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
         Ok(slack) => slack,
         Err(e) => {
             println!("Failed to load slack: {}", e.description());
@@ -61,6 +61,7 @@ fn main() {
         }
     };
 
+    let slack_client_secret = slack_cfg.secret.clone();
     let slack_sender = match load_slack_sink(slack_receive, slack_cfg, &ev.handle()) {
         Ok(s) => s,
         Err(e) => {
@@ -82,6 +83,9 @@ fn main() {
             let res = cli.run(&mut slack_agent);
             if let Err(e) = res {
                 error!("restarting the slack connection after error: {}", e);
+            }
+            if let Ok(new_cli) = slack::RtmClient::login(&slack_client_secret) {
+                cli = new_cli;
             }
         }
     });
