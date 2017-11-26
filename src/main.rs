@@ -77,7 +77,14 @@ fn main() {
             return;
         }
     };
-    thread::spawn(move || cli.run(&mut slack_agent));
+    thread::spawn(move || {
+        loop {
+            let res = cli.run(&mut slack_agent);
+            if let Err(e) = res {
+                error!("restarting the slack connection after error: {}", e);
+            }
+        }
+    });
     // cranking the event loop
     info!("starting up the relay");
     loop {

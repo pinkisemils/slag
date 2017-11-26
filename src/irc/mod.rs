@@ -62,7 +62,7 @@ pub fn init_irc(cfg: IrcCfg,
             }
         })
         .map_err(|e| {
-            info!("slack client has shut down - {}", e);
+            info!("irc connection is shut down: {}", e);
             ()
         })
         .forward(slack_chan.sink_map_err(|_| ()))

@@ -210,6 +210,7 @@ impl SlackSender {
         let out_chan = cfg.channels.get(&pmsg.chan)?;
         if let Ok(msg_payload) = PayloadBuilder::new()
             .text(pmsg.msg.clone())
+
             .channel(out_chan.clone())
             .username(pmsg.nick.clone())
             .icon_emoji(":winkwink:")
