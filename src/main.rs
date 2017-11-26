@@ -70,22 +70,25 @@ fn main() {
         }
     };
     slack_sender.process(&ev.handle());
+    let handle = ev.handle();
 
-    match irc::init_irc(irc_cfg, &mut ev, irc_receive, slack_send) {
+    match ev.run(irc::init_irc(irc_cfg, handle, irc_receive, slack_send)) {
         Ok(i) => i,
         Err(e) => {
             error!("Failed to load irc: {}", e.description());
             return;
         }
     };
+
     thread::spawn(move || {
         loop {
             let res = cli.run(&mut slack_agent);
             if let Err(e) = res {
                 error!("restarting the slack connection after error: {}", e);
             }
-            if let Ok(new_cli) = slack::RtmClient::login(&slack_client_secret) {
-                cli = new_cli;
+            match slack::RtmClient::login(&slack_client_secret) {
+                Ok(new_cli) => cli = new_cli,
+                Err(e) => error!("failed to reconnect to slack {}", e),
             }
         }
     });

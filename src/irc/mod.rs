@@ -1,7 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use std::net;
 
-use tokio_core::reactor::Core;
+use tokio_core::reactor::Handle;
 
 use futures::{Future, Sink, Stream, stream};
 use futures::sync::mpsc;
@@ -34,11 +34,12 @@ pub struct IrcCfg {
     channels: HashMap<String, IrcChan>,
 }
 
+
 pub fn init_irc(cfg: IrcCfg,
-                core: &mut Core,
+                tok_handle: Handle,
                 in_stream: mpsc::Receiver<SlackMsg>,
                 slack_chan: mpsc::Sender<SlackMsg>)
-                -> Result<(), SlagErr> {
+                -> impl Future<Item=(), Error=SlagErr>{
 
     let mut connect_seq = vec![
             client_msg::nick(&cfg.nick),
@@ -48,40 +49,40 @@ pub fn init_irc(cfg: IrcCfg,
         .iter()
         .map(|(chan_name, _)| client_msg::join(&chan_name, None)));
 
-    let client = Client::new(cfg.address)
-        .connect(&core.handle())
+
+    Client::new(cfg.address)
+        .connect(&tok_handle)
         .and_then(|c| c.send_all(stream::iter_result(connect_seq)))
-        .and_then(|(c, _)| Ok(c.split()));
-    let (irc_tx, irc_rx) = core.run(client)?;
-    info!("conencted to IRC");
+        .and_then(|(c, _)| Ok(c.split()))
+        .map_err(|e| e.into())
+        .and_then(move |(irc_tx, irc_rx)| {
+            info!("conencted to IRC");
+            let incoming_messages = irc_rx.filter_map(|message| {
+                    match try_priv_msg(&message) {
+                        Some(pmsg) => Some(SlackMsg::OutMsg(pmsg)),
+                        None => None,
+                    }
+                })
+                .map_err(|e| {
+                    info!("irc connection is shut down: {}", e);
+                    ()
+                })
+                .forward(slack_chan.sink_map_err(|_| ()))
+                .map(|_| ());
+            tok_handle.spawn(incoming_messages);
 
-    let incoming_messages = irc_rx.filter_map(|message| {
-            match try_priv_msg(&message) {
-                Some(pmsg) => Some(SlackMsg::OutMsg(pmsg)),
-                None => None,
-            }
+            let outgoing_messages = in_stream.filter_map(handle_slack_msg)
+                .map_err(|_| IrcErr::from(IrcErrKind::Msg("message sender depleted".into())))
+                .forward(irc_tx)
+                .map(|_| ())
+                .map_err(|e| {
+                    info!("stopping sending messages to irc because: {}", e);
+                    ()
+                });
+            tok_handle.spawn(outgoing_messages);
+            Ok(())
+
         })
-        .map_err(|e| {
-            info!("irc connection is shut down: {}", e);
-            ()
-        })
-        .forward(slack_chan.sink_map_err(|_| ()))
-        .map(|_| ());
-
-    core.handle().spawn(incoming_messages);
-
-    let outgoing_messages = in_stream.filter_map(handle_slack_msg)
-        .map_err(|_| IrcErr::from(IrcErrKind::Msg("message sender depleted".into())))
-        .forward(irc_tx)
-        .map(|_| ())
-        .map_err(|e| {
-            info!("stopping sending messages to irc because: {}", e);
-            ()
-        });
-    core.handle().spawn(outgoing_messages);
-
-
-    Ok(())
 }
 
 fn handle_slack_msg(slack_msg: SlackMsg) -> Option<irc_msg> {
