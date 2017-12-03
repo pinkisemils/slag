@@ -31,7 +31,8 @@ pub struct IrcCfg {
     address: net::SocketAddr,
     nick: String,
     user: String,
-    channels: HashMap<String, IrcChan>,
+    #[serde(skip)]
+    pub channels: HashMap<String, String>,
 }
 
 
@@ -49,6 +50,8 @@ pub fn init_irc(cfg: IrcCfg,
         .iter()
         .map(|(chan_name, _)| client_msg::join(&chan_name, None)));
 
+    let channels = cfg.channels;
+
 
     Client::new(cfg.address)
         .connect(&tok_handle)
@@ -57,10 +60,12 @@ pub fn init_irc(cfg: IrcCfg,
         .map_err(|e| e.into())
         .and_then(move |(irc_tx, irc_rx)| {
             info!("conencted to IRC");
-            let incoming_messages = irc_rx.filter_map(|message| {
-                    match try_priv_msg(&message) {
-                        Some(pmsg) => Some(SlackMsg::OutMsg(pmsg)),
-                        None => None,
+            let incoming_messages = irc_rx.filter_map(move |message| {
+                    let pmsg = try_priv_msg(&message)?;
+                    if channels.contains_key(&pmsg.chan) {
+                        Some(SlackMsg::OutMsg(pmsg))
+                    } else {
+                        None
                     }
                 })
                 .map_err(|e| {

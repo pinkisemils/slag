@@ -21,6 +21,7 @@ use message::{PrivMsg, SlackMsg};
 pub struct SlackCfg {
     pub secret: String,
     pub hook_url: String,
+    #[serde(skip)]
     pub channels: HashMap<String, String>,
 }
 

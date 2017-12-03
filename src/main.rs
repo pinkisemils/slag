@@ -51,7 +51,7 @@ fn main() {
         }
     };
 
-    let cfg::Cfg { irc_cfg, slack_cfg } = cfg;
+    let  (irc_cfg, slack_cfg)  = cfg.get_cfg();
 
     let (mut cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
         Ok(slack) => slack,
