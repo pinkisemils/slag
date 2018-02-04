@@ -5,6 +5,7 @@ use slack_hook;
 use pircolate;
 use config;
 use tokio_irc_client;
+use aatxe_irc;
 
 
 error_chain!{
@@ -13,6 +14,10 @@ error_chain!{
     }
 
     errors {
+        SlackChanDown {
+            description("slack channel depleted")
+            display("slack channel depleted")
+        }
     }
 
     links {

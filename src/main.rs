@@ -12,6 +12,8 @@ extern crate tokio_core;
 extern crate tokio_pool;
 extern crate log4rs;
 extern crate slack_hook;
+extern crate irc as aatxe_irc;
+extern crate actix;
 
 #[macro_use]
 extern crate log;
@@ -61,7 +63,7 @@ fn main() {
         }
     };
 
-    let slack_client_secret = slack_cfg.secret.clone();
+    let slack_client_secret = slack_cfg.secret.to_string();
     let slack_sender = match load_slack_sink(slack_receive, slack_cfg, &ev.handle()) {
         Ok(s) => s,
         Err(e) => {
@@ -71,14 +73,6 @@ fn main() {
     };
     slack_sender.process(&ev.handle());
     let handle = ev.handle();
-
-    match ev.run(irc::init_irc(irc_cfg, handle, irc_receive, slack_send)) {
-        Ok(i) => i,
-        Err(e) => {
-            error!("Failed to load irc: {}", e.description());
-            return;
-        }
-    };
 
     thread::spawn(move || {
         loop {
@@ -92,6 +86,7 @@ fn main() {
             }
         }
     });
+
     // cranking the event loop
     info!("starting up the relay");
     loop {
