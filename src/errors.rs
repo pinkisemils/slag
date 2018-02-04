@@ -18,6 +18,10 @@ error_chain!{
             description("slack channel depleted")
             display("slack channel depleted")
         }
+        AatxeErr(e: aatxe_irc::error::IrcError) {
+            description("underlying irc error: {:?}")
+            display("underlying irc error: {:?}", e)
+        }
     }
 
     links {

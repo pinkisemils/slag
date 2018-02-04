@@ -7,6 +7,7 @@ use tokio_core::reactor;
 
 use futures::{future, stream, Future, IntoFuture, Sink, Stream};
 use futures::sync::mpsc;
+use futures::sync::oneshot::Canceled;
 
 
 use pircolate::message::client as client_msg;
@@ -22,6 +23,7 @@ use tokio_irc_client::error::ErrorKind as IrcErrKind;
 use message::{PrivMsg, SlackMsg};
 use errors::{SlagErr, SlagErrKind};
 
+use aatxe_irc;
 use aatxe_irc::client::data::Config as AatxeConfig;
 use aatxe_irc::client::reactor::IrcReactor;
 use aatxe_irc::client::{Client, IrcClient, PackedIrcClient};
@@ -45,6 +47,12 @@ pub struct IrcCfg {
     pub channels: HashMap<String, String>,
 }
 
+#[derive(Debug)]
+enum IrcOutMsg {
+    FromSlack(SlackMsg),
+    Shutdown,
+}
+
 impl IrcCfg {
     fn conn_from_cfg(&self) -> AatxeConfig {
         AatxeConfig {
@@ -55,12 +63,13 @@ impl IrcCfg {
         }
     }
 
-    pub fn run_once(
+    fn run_once(
         &mut self,
-        core: &mut reactor::Core,
-        in_stream: mpsc::Receiver<SlackMsg>,
+        core: &mut Core,
+        shutdown_chan: mpsc::Sender<IrcOutMsg>,
+        in_stream: mpsc::Receiver<IrcOutMsg>,
         mut slack_chan: &mut mpsc::Sender<SlackMsg>,
-    ) -> Result<(), SlagErr> {
+    ) -> Result<mpsc::Receiver<IrcOutMsg>, SlagErr> {
         let cfg = self.conn_from_cfg();
         let future = IrcClient::new_future(core.handle(), &cfg).unwrap();
         // immediate connection errors (like no internet) will turn up here...
@@ -77,27 +86,20 @@ impl IrcCfg {
                 try_send_to_slack(&mut slack_chan, msg);
                 Ok(())
             })
-            .join(future);
-        core.run(work).unwrap();
+            .then(|_| shutdown_chan.send(IrcOutMsg::Shutdown))
+            .map_err(|_| aatxe_irc::error::IrcError::OneShotCanceled(Canceled {}))
+            .map_err(|e| SlagErrKind::AatxeErr(e).into())
+            .join3(
+                future.map_err(|e| SlagErrKind::AatxeErr(e).into()),
+                slack_sender,
+            );
 
-        // let res = core.prepare_client_and_connect(&cfg)
-        //         .and_then(|cl| cl.identify().and(Ok(cl)))
-        //         .and_then(|cl| {
-        //             let sender = cl.clone();
-        //             let sink = in_stream
-        //                 .filter_map(handle_slack_msg)
-        //                 .for_each(|m| {
-        //                     sender.send(m);
-        //                     Ok(())
-        //                 });
-        //             core.inner_handle().spawn(sink);
-        //             core.register_client_with_handler(cl, |_, message| {
-
-        //             });
-
-        //             Ok(())
-        //         });
-        Ok(())
+        // Sink error takes precedence - if the slack sink isn't there anymore, the loop has to be
+        // shut down. Otherwise, return irc_err.
+        match core.run(work) {
+            Err(e) => Err(e),
+            Ok((_, _, sink_chan)) => Ok(sink_chan),
+        }
     }
 }
 
@@ -105,15 +107,19 @@ impl IrcCfg {
 
 
 fn consume_sender(
-    output_stream: mpsc::Receiver<SlackMsg>,
+    output_stream: mpsc::Receiver<IrcOutMsg>,
     sender: IrcClient,
-) -> Box<Future<Item = mpsc::Receiver<SlackMsg>, Error = SlagErr> + Send> {
+) -> Box<Future<Item = mpsc::Receiver<IrcOutMsg>, Error = SlagErr> + Send> {
     let next = output_stream.into_future();
     next.then(|res| {
         let (msg, stream) = res.unwrap();
         let msg = match msg {
             Some(m) => m,
             None => return Err(SlagErr::from(SlagErrKind::SlackChanDown)),
+        };
+        let msg = match msg {
+            IrcOutMsg::Shutdown => return Ok(future::ok(stream).boxed()),
+            IrcOutMsg::FromSlack(m) => m,
         };
 
         let msg = match handle_slack_msg(msg) {
@@ -133,20 +139,6 @@ fn consume_sender(
     }).flatten()
         .boxed()
 }
-
-fn resolve_consumption(
-    stream: mpsc::Receiver<SlackMsg>,
-) -> impl Future<Item = mpsc::Receiver<SlackMsg>, Error = SlagErr> {
-    future::ok(stream)
-}
-
-// fn handle_msg_send(r: Result<String, ()>) {
-//     match r {
-//         Err(e) => error!("ayy lmau: {}", e),
-//         _ => (),
-//     }
-// }
-//
 
 fn try_send_to_slack(chan: &mut mpsc::Sender<SlackMsg>, slack_msg: SlackMsg) {
     if let Err(e) = chan.try_send(slack_msg) {
