@@ -44,7 +44,7 @@ fn main() {
     let mut ev = Core::new().unwrap();
 
     let (irc_send, irc_receive) = mpsc::channel(1024);
-    let (slack_send, slack_receive) = mpsc::channel(1024);
+    let (mut slack_send, slack_receive) = mpsc::channel(1024);
     let cfg = match get_config() {
         Ok(c) => c,
         Err(e) => {
@@ -53,7 +53,7 @@ fn main() {
         }
     };
 
-    let  (irc_cfg, slack_cfg)  = cfg.get_cfg();
+    let  (mut irc_cfg, slack_cfg) = cfg.get_cfg();
 
     let (mut cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
         Ok(slack) => slack,
@@ -72,7 +72,6 @@ fn main() {
         }
     };
     slack_sender.process(&ev.handle());
-    let handle = ev.handle();
 
     thread::spawn(move || {
         loop {
@@ -89,9 +88,13 @@ fn main() {
 
     // cranking the event loop
     info!("starting up the relay");
-    loop {
-        ev.turn(None)
-    }
+    match irc_cfg.run(&mut ev, irc_receive, &mut slack_send) {
+        Ok(i) => i,
+        Err(e) => {
+            error!("Failed to run irc: {}", e.description());
+            return;
+        }
+    };
 
 }
 

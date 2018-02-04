@@ -5,7 +5,7 @@ use std::error::Error;
 
 use tokio_core::reactor;
 
-use futures::{future, stream, Future, IntoFuture, Sink, Stream};
+use futures::{future, Future, Sink, Stream};
 use futures::sync::mpsc;
 use futures::sync::oneshot::Canceled;
 
@@ -65,7 +65,7 @@ impl IrcCfg {
 
     fn run_once(
         &mut self,
-        core: &mut Core,
+        core: &mut reactor::Core,
         shutdown_chan: mpsc::Sender<IrcOutMsg>,
         in_stream: mpsc::Receiver<IrcOutMsg>,
         mut slack_chan: &mut mpsc::Sender<SlackMsg>,
@@ -99,6 +99,38 @@ impl IrcCfg {
         match core.run(work) {
             Err(e) => Err(e),
             Ok((_, _, sink_chan)) => Ok(sink_chan),
+        }
+    }
+
+
+    pub fn run(
+        &mut self,
+        core: &mut reactor::Core,
+        in_stream: mpsc::Receiver<SlackMsg>,
+        slack_chan: &mut mpsc::Sender<SlackMsg>,
+    ) -> Result<(), SlagErr> {
+        let (sink_in, mut sink_out) = mpsc::channel(32);
+        let slack_msgs = in_stream
+            .map(|m| IrcOutMsg::FromSlack(m))
+            .map_err(|_| ());
+
+        let slack_pipe = sink_in.clone()
+            .sink_map_err(|_| ())
+            .send_all(slack_msgs)
+            .then(|_| Ok(()))
+            ;
+        core.handle().spawn(slack_pipe);
+
+        loop {
+            match self.run_once(core, sink_in.clone(), sink_out, slack_chan){
+                Ok(slack_msg_chan) => {
+                    sink_out = slack_msg_chan;
+                    continue
+                },
+                Err(e) => return Err(e),
+
+            }
+
         }
     }
 }
