@@ -95,6 +95,7 @@ fn main() {
             return;
         }
     };
+    info!("irc stopped");
 
 }
 

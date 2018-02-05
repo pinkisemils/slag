@@ -8,6 +8,7 @@ use tokio_core::reactor;
 use futures::{future, Future, Sink, Stream};
 use futures::sync::mpsc;
 use futures::sync::oneshot::Canceled;
+use futures::sync::oneshot;
 
 
 use pircolate::message::client as client_msg;
@@ -43,8 +44,7 @@ pub struct IrcCfg {
     port: u16,
     nick: String,
     user: String,
-    #[serde(skip)]
-    pub channels: HashMap<String, String>,
+    #[serde(skip)] pub channels: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +59,8 @@ impl IrcCfg {
             nickname: Some(self.nick.clone()),
             server: Some(self.host.clone()),
             port: Some(self.port),
+            channels: Some(self.channels.keys().cloned().collect()),
+            use_ssl: Some(false),
             ..Default::default()
         }
     }
@@ -75,8 +77,14 @@ impl IrcCfg {
         // immediate connection errors (like no internet) will turn up here...
         let PackedIrcClient(client, future) = core.run(future).unwrap();
         let sender = client.clone();
+        let (stop_sender, recv_slack_stream) = oneshot::channel();
         // runtime errors (like disconnections and so forth) will turn up here...
-        let slack_sender = consume_sender(in_stream, sender);
+        let slack_sender = consume_sender(in_stream, stop_sender, sender);
+
+        core.handle().spawn(slack_sender);
+        let res = client.identify();
+        info!("result - {:?}", res);
+
 
 
         let work = client
@@ -86,20 +94,27 @@ impl IrcCfg {
                 try_send_to_slack(&mut slack_chan, msg);
                 Ok(())
             })
-            .then(|_| shutdown_chan.send(IrcOutMsg::Shutdown))
+            .then(|res| {
+                info!("stopped sending because: {:?}", res);
+                shutdown_chan.send(IrcOutMsg::Shutdown)
+            })
             .map_err(|_| aatxe_irc::error::IrcError::OneShotCanceled(Canceled {}))
-            .map_err(|e| SlagErrKind::AatxeErr(e).into())
-            .join3(
-                future.map_err(|e| SlagErrKind::AatxeErr(e).into()),
-                slack_sender,
-            );
+            .join(future);
 
         // Sink error takes precedence - if the slack sink isn't there anymore, the loop has to be
         // shut down. Otherwise, return irc_err.
-        match core.run(work) {
-            Err(e) => Err(e),
-            Ok((_, _, sink_chan)) => Ok(sink_chan),
-        }
+        info!("trying to irc");
+        let result = core.run(work);
+        let slack_stream = match core.run(recv_slack_stream)
+            .map_err(|_| SlagErr::from(SlagErrKind::SlackChanDown))?
+        {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
+
+        // handle result better to return a proper error if IRC is dead
+        info!("stopped sending/receiveing because: {:?}", result);
+        return Ok(slack_stream);
     }
 
 
@@ -110,27 +125,27 @@ impl IrcCfg {
         slack_chan: &mut mpsc::Sender<SlackMsg>,
     ) -> Result<(), SlagErr> {
         let (sink_in, mut sink_out) = mpsc::channel(32);
-        let slack_msgs = in_stream
-            .map(|m| IrcOutMsg::FromSlack(m))
-            .map_err(|_| ());
+        let slack_msgs = in_stream.map(|m| IrcOutMsg::FromSlack(m)).map_err(|_| ());
 
-        let slack_pipe = sink_in.clone()
+        let slack_pipe = sink_in
+            .clone()
             .sink_map_err(|_| ())
             .send_all(slack_msgs)
-            .then(|_| Ok(()))
-            ;
+            .then(|_| Ok(()));
         core.handle().spawn(slack_pipe);
 
         loop {
-            match self.run_once(core, sink_in.clone(), sink_out, slack_chan){
+            match self.run_once(core, sink_in.clone(), sink_out, slack_chan) {
                 Ok(slack_msg_chan) => {
                     sink_out = slack_msg_chan;
-                    continue
-                },
-                Err(e) => return Err(e),
-
-            }
-
+                    info!("trying to irc again");
+                    continue;
+                }
+                Err(e) => {
+                    info!("stopping because: {:?}", e);
+                    return Err(e);
+                }
+            };
         }
     }
 }
@@ -140,36 +155,47 @@ impl IrcCfg {
 
 fn consume_sender(
     output_stream: mpsc::Receiver<IrcOutMsg>,
+    out_chan: oneshot::Sender<Result<mpsc::Receiver<IrcOutMsg>, SlagErr>>,
     sender: IrcClient,
-) -> Box<Future<Item = mpsc::Receiver<IrcOutMsg>, Error = SlagErr> + Send> {
+) -> Box<Future<Item = (), Error = ()> + Send> {
     let next = output_stream.into_future();
     next.then(|res| {
         let (msg, stream) = res.unwrap();
+        info!("getting real tired of this shit: {:?}", msg);
         let msg = match msg {
             Some(m) => m,
-            None => return Err(SlagErr::from(SlagErrKind::SlackChanDown)),
+            None => {
+                out_chan
+                    .send(Err(SlagErr::from(SlagErrKind::SlackChanDown)))
+                    .map_err(|_| ());
+                return future::ok(()).boxed();
+            }
         };
         let msg = match msg {
-            IrcOutMsg::Shutdown => return Ok(future::ok(stream).boxed()),
+            IrcOutMsg::Shutdown => {
+                out_chan.send(Ok(stream));
+                return future::ok(()).boxed();
+            }
             IrcOutMsg::FromSlack(m) => m,
         };
 
         let msg = match handle_slack_msg(msg) {
             None => {
-                return Ok(consume_sender(stream, sender).boxed());
+                return consume_sender(stream, out_chan, sender);
             }
             Some(m) => m,
         };
 
         match sender.send(msg) {
-            Ok(_) => Ok(consume_sender(stream, sender).boxed()),
+            Ok(_) => consume_sender(stream, out_chan, sender),
             Err(e) => {
                 error!("encountered error sending to irc: {:?}", e);
-                Ok(future::ok(stream).boxed())
+                out_chan.send(Ok(stream));
+
+                return future::ok(()).boxed();
             }
         }
-    }).flatten()
-        .boxed()
+    }).boxed()
 }
 
 fn try_send_to_slack(chan: &mut mpsc::Sender<SlackMsg>, slack_msg: SlackMsg) {
