@@ -61,6 +61,8 @@ impl IrcCfg {
             port: Some(self.port),
             channels: Some(self.channels.keys().cloned().collect()),
             use_ssl: Some(false),
+            ping_time: Some(5),
+            ping_timeout: Some(5),
             ..Default::default()
         }
     }
@@ -73,18 +75,28 @@ impl IrcCfg {
         mut slack_chan: &mut mpsc::Sender<SlackMsg>,
     ) -> Result<mpsc::Receiver<IrcOutMsg>, SlagErr> {
         let cfg = self.conn_from_cfg();
+        // TODO: handle these unwraps
         let future = IrcClient::new_future(core.handle(), &cfg).unwrap();
         // immediate connection errors (like no internet) will turn up here...
+        // TODO: Handle this unwrap
         let PackedIrcClient(client, future) = core.run(future).unwrap();
         let sender = client.clone();
         let (stop_sender, recv_slack_stream) = oneshot::channel();
         // runtime errors (like disconnections and so forth) will turn up here...
         let slack_sender = consume_sender(in_stream, stop_sender, sender);
 
-        core.handle().spawn(slack_sender);
-        let res = client.identify();
-        info!("result - {:?}", res);
+        let alleged_future = future
+            .map_err(|e| {
+                error!("the _alleged future_ failed: {:?}", e);
+                ()
+            })
+            ;
 
+        core.handle().spawn(slack_sender);
+        core.handle().spawn(alleged_future);
+
+        // TODO handle this
+        let res = client.identify();
 
 
         let work = client
@@ -98,13 +110,13 @@ impl IrcCfg {
                 info!("stopped sending because: {:?}", res);
                 shutdown_chan.send(IrcOutMsg::Shutdown)
             })
-            .map_err(|_| aatxe_irc::error::IrcError::OneShotCanceled(Canceled {}))
-            .join(future);
+            .map_err(|_| aatxe_irc::error::IrcError::OneShotCanceled(Canceled {}));
 
         // Sink error takes precedence - if the slack sink isn't there anymore, the loop has to be
         // shut down. Otherwise, return irc_err.
         info!("trying to irc");
         let result = core.run(work);
+        info!("stopped ircing");
         let slack_stream = match core.run(recv_slack_stream)
             .map_err(|_| SlagErr::from(SlagErrKind::SlackChanDown))?
         {
@@ -190,9 +202,7 @@ fn consume_sender(
             Ok(_) => consume_sender(stream, out_chan, sender),
             Err(e) => {
                 error!("encountered error sending to irc: {:?}", e);
-                out_chan.send(Ok(stream));
-
-                return future::ok(()).boxed();
+                consume_sender(stream, out_chan, sender)
             }
         }
     }).boxed()
