@@ -56,13 +56,29 @@ fn init_logging(log_level: simplelog::LevelFilter) {
 
 
 fn main() {
-    init_logging(simplelog::LevelFilter::Trace);
+    let matches = clap_app!(slagw =>
+        (version: "0.1")
+        (author: "emilsp")
+        (about: "Relays messages between IRC and Slack")
+        (@arg CONFIG: -c --config +takes_value "Custom path for config file")
+        (@arg debug: -d ... "Enable debug output")
+    ).get_matches();
 
+
+    let logging_level = if matches.is_present("debug") {
+        simplelog::LevelFilter::Debug
+    } else {
+        simplelog::LevelFilter::Warn
+    };
+    let config_file = matches.value_of("CONFIG");
+
+    init_logging(logging_level);
+    // Same as before...
     let mut ev = Core::new().unwrap();
 
     let (irc_send, irc_receive) = mpsc::channel(1024);
     let (mut slack_send, slack_receive) = mpsc::channel(1024);
-    let cfg = match get_config(None) {
+    let cfg = match get_config(config_file) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to load config: {:?}", e);
@@ -130,7 +146,7 @@ fn load_slack_sink(
     SlackSender::new(slack_sink, cfg, handle)
 }
 
-fn get_config(path: Option<String>) -> Result<cfg::Cfg, errors::SlagErr> {
+fn get_config(path: Option<&str>) -> Result<cfg::Cfg, errors::SlagErr> {
     use config::Source;
     let mut c = config::Config::new();
     if let Some(p) = path {
