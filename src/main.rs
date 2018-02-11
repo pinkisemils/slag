@@ -5,23 +5,23 @@ extern crate config;
 extern crate futures;
 extern crate irc as aatxe_irc;
 extern crate serde;
+extern crate simplelog;
 extern crate slack;
 extern crate slack_api;
 extern crate slack_hook;
 extern crate tokio_core;
 extern crate tokio_pool;
 extern crate tokio_timer;
-extern crate simplelog;
 
 
+#[macro_use]
+extern crate clap;
 #[macro_use]
 extern crate error_chain;
 #[macro_use]
 extern crate log;
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
-extern crate clap;
 
 
 use std::thread;
@@ -40,7 +40,7 @@ use errors::SlagErr;
 fn logging_conf() -> simplelog::Config {
     use simplelog::*;
 
-    Config{
+    Config {
         time: Some(Level::Error),
         target: Some(Level::Error),
         location: Some(Level::Error),
@@ -56,14 +56,13 @@ fn init_logging(log_level: simplelog::LevelFilter) {
 
 
 fn main() {
-
     init_logging(simplelog::LevelFilter::Trace);
 
     let mut ev = Core::new().unwrap();
 
     let (irc_send, irc_receive) = mpsc::channel(1024);
     let (mut slack_send, slack_receive) = mpsc::channel(1024);
-    let cfg = match get_config() {
+    let cfg = match get_config(None) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to load config: {:?}", e);
@@ -71,7 +70,7 @@ fn main() {
         }
     };
 
-    let  (mut irc_cfg, slack_cfg) = cfg.get_cfg();
+    let (mut irc_cfg, slack_cfg) = cfg.get_cfg();
 
     let (mut cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
         Ok(slack) => slack,
@@ -91,16 +90,14 @@ fn main() {
     };
     slack_sender.process(&ev.handle());
 
-    thread::spawn(move || {
-        loop {
-            let res = cli.run(&mut slack_agent);
-            if let Err(e) = res {
-                error!("restarting the slack connection after error: {}", e);
-            }
-            match slack::RtmClient::login(&slack_client_secret) {
-                Ok(new_cli) => cli = new_cli,
-                Err(e) => error!("failed to reconnect to slack {}", e),
-            }
+    thread::spawn(move || loop {
+        let res = cli.run(&mut slack_agent);
+        if let Err(e) = res {
+            error!("restarting the slack connection after error: {}", e);
+        }
+        match slack::RtmClient::login(&slack_client_secret) {
+            Ok(new_cli) => cli = new_cli,
+            Err(e) => error!("failed to reconnect to slack {}", e),
         }
     });
 
@@ -114,27 +111,55 @@ fn main() {
         }
     };
     warn!("irc stopped");
-
 }
 
-fn load_slack_receiver(cfg: slack_client::SlackCfg,
-                       irc_stream: mpsc::Sender<message::SlackMsg>)
-                       -> Result<(slack::RtmClient, SlackReceiver), errors::SlagErr> {
+fn load_slack_receiver(
+    cfg: slack_client::SlackCfg,
+    irc_stream: mpsc::Sender<message::SlackMsg>,
+) -> Result<(slack::RtmClient, SlackReceiver), errors::SlagErr> {
     let cli = slack::RtmClient::login(&cfg.secret.clone())?;
     let slack_agent = SlackReceiver::new(cfg, irc_stream, &cli);
     Ok((cli, slack_agent))
 }
 
-fn load_slack_sink(slack_sink: mpsc::Receiver<message::SlackMsg>,
-                   cfg: slack_client::SlackCfg,
-                   handle: &Handle)
-                   -> Result<SlackSender, SlagErr> {
+fn load_slack_sink(
+    slack_sink: mpsc::Receiver<message::SlackMsg>,
+    cfg: slack_client::SlackCfg,
+    handle: &Handle,
+) -> Result<SlackSender, SlagErr> {
     SlackSender::new(slack_sink, cfg, handle)
 }
 
-fn get_config() -> Result<cfg::Cfg, errors::SlagErr> {
+fn get_config(path: Option<String>) -> Result<cfg::Cfg, errors::SlagErr> {
+    use config::Source;
     let mut c = config::Config::new();
-    c.merge(config::File::with_name("config.yaml"))?;
+    if let Some(p) = path {
+        c.merge(config::File::with_name(&p))?;
+    } else {
+        // this is why rust is sucky
+        // can't just do get_home_config().as_path().to_str().unwrap_or("") due to lifetime issues.
+        // Nevermind the ugliness of the statement above as it is.
+        let empty_home_conf = "";
+        let home_conf = get_home_config();
+        let home_conf = home_conf.as_path();
+        config::File::with_name("config.yaml")
+            .collect_to(&mut c.cache)
+            .or_else(|_| {
+                config::File::with_name(home_conf.to_str().unwrap_or(empty_home_conf))
+                    .collect_to(&mut c.cache)
+            })
+            .or_else(|_| {
+                config::File::with_name("/etc/slagw/config.yaml").collect_to(&mut c.cache)
+            })?;
+    };
     let cfg = c.try_into()?;
     Ok(cfg)
+}
+
+fn get_home_config() -> std::path::PathBuf {
+    use std::env::home_dir;
+    use std::path::PathBuf;
+    let mut buf = home_dir().unwrap_or(PathBuf::new());
+    buf.push(r".config/slagw/config.yaml");
+    buf
 }
