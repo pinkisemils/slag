@@ -10,8 +10,6 @@ use futures::{future, Future, Sink, Stream};
 use futures::sync::mpsc;
 use futures::sync::oneshot;
 
-
-
 use message::{PrivMsg, SlackMsg};
 use errors::{SlagErr, SlagErrKind};
 
@@ -36,7 +34,9 @@ pub struct IrcCfg {
     nick: String,
     user: String,
     pass: Option<String>,
-    #[serde(skip)] pub channels: HashMap<String, String>,
+    use_ssl: Option<bool>,
+    #[serde(skip)]
+    pub channels: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -67,7 +67,7 @@ impl IrcCfg {
             server: Some(self.host.clone()),
             port: Some(self.port),
             channels: Some(self.channels.keys().cloned().collect()),
-            use_ssl: Some(false),
+            use_ssl: Some(self.use_ssl.unwrap_or(true)),
             ping_time: Some(5),
             ping_timeout: Some(5),
             password: self.pass.clone(),
@@ -96,7 +96,10 @@ impl IrcCfg {
             Err(e) => return ConnResult::Recoverable(in_stream, IrcFailure::Connection(e)),
         };
         let PackedIrcClient(client, inner_fut) = client;
-        let inner_fut = inner_fut.map_err(|_| ());
+        let inner_fut = inner_fut.map_err(|e| {
+            error!("error with connection: {:?}", e);
+            ()
+        });
 
         core.handle().spawn(inner_fut);
 
@@ -112,12 +115,13 @@ impl IrcCfg {
 
         core.handle().spawn(slack_sender);
 
-
-
         let work = client
             .stream()
             // errors here mean a disconnection
-            .map_err(|_| IrcFailure::Disconnect)
+            .map_err(|e| {
+                error!("got IRC error {:?}", e);
+                IrcFailure::Disconnect
+            })
             .filter_map(handle_irc_msg)
             .for_each(|msg| match msg {
                 Incoming::ForwardMsg(m) => {
@@ -143,7 +147,6 @@ impl IrcCfg {
         }
         // unwrapping a future that is never cancelled
     }
-
 
     // TODO consider futurizing this function
     pub fn run(
@@ -201,7 +204,6 @@ enum ErrResolution {
     Die(IrcFailure),
 }
 
-
 // Deals with backoff periods
 impl ErrState {
     fn new() -> ErrState {
@@ -239,10 +241,6 @@ impl ErrState {
         }
     }
 }
-
-
-
-
 
 // A recursive future that will send messages from output_stream until it runs out or
 // output_stream delivers an IrcOutMsg::SenderShutdown.
@@ -290,8 +288,7 @@ fn try_send_to_slack(chan: &mut mpsc::Sender<SlackMsg>, slack_msg: SlackMsg) {
         let dropped_message = e.into_inner();
         error!(
             "dropped message '{:?}' when sending to slack: {}",
-            dropped_message,
-            desc
+            dropped_message, desc
         );
     }
 }
@@ -303,7 +300,6 @@ enum Incoming {
     Error(String),
 }
 
-
 fn handle_irc_msg(irc_msg: AatxeMsg) -> Option<Incoming> {
     let nick = irc_msg.source_nickname()?.to_string();
     let cmd = irc_msg.command;
@@ -314,7 +310,6 @@ fn handle_irc_msg(irc_msg: AatxeMsg) -> Option<Incoming> {
         _ => None,
     }
 }
-
 
 fn handle_privmsg(nick: String, target: String, msg: String) -> Incoming {
     Incoming::ForwardMsg(SlackMsg::OutMsg(PrivMsg {
