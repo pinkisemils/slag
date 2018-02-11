@@ -168,7 +168,7 @@ impl IrcCfg {
         loop {
             match self.run_once(core, sink_in.clone(), sink_out, slack_chan) {
                 ConnResult::Recoverable(slack_chan, err) => {
-                    info!("got irc err- {:?}", err);
+                    error!("got irc err- {:?}", err);
                     sink_out = slack_chan;
                     match err_state.handle_error(err) {
                         ErrResolution::Die(e) => {
@@ -178,7 +178,7 @@ impl IrcCfg {
                         ErrResolution::Backoff(time) => {
                             let sleep = timer.sleep(Duration::from_secs(time));
                             core.run(sleep).expect("failed to sleep");
-                            info!("trying to reconnect to IRC");
+                            warn!("trying to reconnect to IRC");
                             continue;
                         }
                     }

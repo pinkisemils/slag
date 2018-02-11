@@ -4,16 +4,14 @@
 extern crate config;
 extern crate futures;
 extern crate irc as aatxe_irc;
-extern crate log4rs;
-extern crate pircolate;
 extern crate serde;
 extern crate slack;
 extern crate slack_api;
 extern crate slack_hook;
 extern crate tokio_core;
-extern crate tokio_irc_client;
 extern crate tokio_pool;
 extern crate tokio_timer;
+extern crate simplelog;
 
 
 #[macro_use]
@@ -22,6 +20,9 @@ extern crate error_chain;
 extern crate log;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate clap;
+
 
 use std::thread;
 use tokio_core::reactor::{Core, Handle};
@@ -36,10 +37,27 @@ mod cfg;
 use slack_client::{SlackReceiver, SlackSender};
 use errors::SlagErr;
 
+fn logging_conf() -> simplelog::Config {
+    use simplelog::*;
+
+    Config{
+        time: Some(Level::Error),
+        target: Some(Level::Error),
+        location: Some(Level::Error),
+        level: Some(Level::Error),
+        ..Default::default()
+    }
+}
+
+fn init_logging(log_level: simplelog::LevelFilter) {
+    use simplelog::*;
+    TermLogger::init(log_level, logging_conf()).expect("failed to initialize logger");
+}
+
+
 fn main() {
 
-    log4rs::init_file("config/log4rs.yml", Default::default())
-        .expect("Couldn't open logging config file");
+    init_logging(simplelog::LevelFilter::Trace);
 
     let mut ev = Core::new().unwrap();
 
@@ -48,7 +66,7 @@ fn main() {
     let cfg = match get_config() {
         Ok(c) => c,
         Err(e) => {
-            println!("Failed to load config: {:?}", e);
+            error!("Failed to load config: {:?}", e);
             return;
         }
     };
@@ -58,7 +76,7 @@ fn main() {
     let (mut cli, mut slack_agent) = match load_slack_receiver(slack_cfg.clone(), irc_send) {
         Ok(slack) => slack,
         Err(e) => {
-            println!("Failed to load slack: {}", e.description());
+            error!("Failed to load slack: {}", e.description());
             return;
         }
     };
@@ -95,7 +113,7 @@ fn main() {
             return;
         }
     };
-    info!("irc stopped");
+    warn!("irc stopped");
 
 }
 

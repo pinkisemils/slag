@@ -149,12 +149,12 @@ impl slack::EventHandler for SlackReceiver {
     }
 
     fn on_close(&mut self, _: &slack::RtmClient) {
-        info!("disconnected from slack");
+        warn!("disconnected from slack");
         self.notify_of_disconnect();
     }
 
     fn on_connect(&mut self, _: &slack::RtmClient) {
-        info!("joined slack");
+        warn!("joined slack");
     }
 }
 
