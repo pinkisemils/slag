@@ -35,6 +35,7 @@ pub struct IrcCfg {
     port: u16,
     nick: String,
     user: String,
+    pass: Option<String>,
     #[serde(skip)] pub channels: HashMap<String, String>,
 }
 
@@ -69,6 +70,7 @@ impl IrcCfg {
             use_ssl: Some(false),
             ping_time: Some(5),
             ping_timeout: Some(5),
+            password: self.pass.clone(),
             ..Default::default()
         }
     }
@@ -94,21 +96,15 @@ impl IrcCfg {
             Err(e) => return ConnResult::Recoverable(in_stream, IrcFailure::Connection(e)),
         };
         let PackedIrcClient(client, inner_fut) = client;
-        let inner_fut = inner_fut.map_err(|_| {
-            ()
-        });
+        let inner_fut = inner_fut.map_err(|_| ());
 
         core.handle().spawn(inner_fut);
 
-        // TODO handle this
-        let res = client.identify();
-        if let Err(e) = res {
+        if let Err(e) = client.identify() {
             return ConnResult::Recoverable(in_stream, IrcFailure::CantIdentify(e));
         }
 
         let sender = client.clone();
-        // runtime errors (like disconnections and so forth) will turn up here...
-
         let (sender_tx, sender_join) = oneshot::channel();
         let slack_sender = consume_sender(in_stream, sender)
             .then(|res| sender_tx.send(res))
@@ -177,13 +173,13 @@ impl IrcCfg {
                     match err_state.handle_error(err) {
                         ErrResolution::Die(e) => {
                             return Err(SlagErrKind::IrcError(e).into());
-                        },
+                        }
                         ErrResolution::Backoff(0) => continue,
                         ErrResolution::Backoff(time) => {
                             let sleep = timer.sleep(Duration::from_secs(time));
                             core.run(sleep).expect("failed to sleep");
                             info!("trying to reconnect to IRC");
-                            continue
+                            continue;
                         }
                     }
                 }
@@ -209,34 +205,37 @@ enum ErrResolution {
 // Deals with backoff periods
 impl ErrState {
     fn new() -> ErrState {
-        ErrState{ err: None, occurence: 0 }
+        ErrState {
+            err: None,
+            occurence: 0,
+        }
     }
 
     // returns None if error is fatal
     // Returns Some(backoff) to backoff for a certain amount of time
     pub fn handle_error(&mut self, err: IrcFailure) -> ErrResolution {
         match &err {
-            &IrcFailure::Disconnect  => self.set_err(err),
+            &IrcFailure::Disconnect => self.set_err(err),
             &IrcFailure::Connection(_) => self.set_err(err),
             &IrcFailure::BadConf(_) => ErrResolution::Die(err),
             &IrcFailure::Error(_) => ErrResolution::Die(err),
             &IrcFailure::CantIdentify(_) => ErrResolution::Die(err),
             &IrcFailure::Shutdown => ErrResolution::Die(err),
-
         }
     }
 
     fn set_err(&mut self, err: IrcFailure) -> ErrResolution {
-        let errors_are_same = self.err.as_ref()
-            .map(|prev_err| discriminant(&err) == discriminant(&prev_err)).
-            unwrap_or(false);
+        let errors_are_same = self.err
+            .as_ref()
+            .map(|prev_err| discriminant(&err) == discriminant(&prev_err))
+            .unwrap_or(false);
         if !errors_are_same {
             self.occurence = 0;
             self.err = Some(err);
             ErrResolution::Backoff(0)
         } else {
             self.occurence += 1;
-            ErrResolution::Backoff((2 as u64).pow(self.occurence - 1 ))
+            ErrResolution::Backoff((2 as u64).pow(self.occurence - 1))
         }
     }
 }
