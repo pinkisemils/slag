@@ -22,3 +22,8 @@ channels:
 Optional options:
 * `irc.use_ssl`, if omitted, defaults to `true`.
 * `irc.pass`, if omitted, the client won't identify with services
+
+## Unrelated dependencies
+This application uses TLS. The TLS situation in Rust currently is a small
+dumpster fire. Thus, make sure to have `pkg-config` in your path and a decent
+`openssl` library installed.

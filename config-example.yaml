@@ -1,7 +1,12 @@
 irc:
-    address: 127.0.0.1:6667
+    host: 127.0.0.1
+    port: 6667
     nick: bot_mcbotface
     user: bots
+    # pass is optional
+    pass: hunter34
+    # if use_ssl is omitted, it's enabled
+    use_ssl: false
 
 slack:
     secret: $slack_token
