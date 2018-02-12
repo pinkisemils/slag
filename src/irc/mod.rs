@@ -32,6 +32,7 @@ pub struct IrcCfg {
     host: String,
     port: u16,
     nick: String,
+    alt_nicks: Option<Vec<String>>,
     user: String,
     pass: Option<String>,
     use_ssl: Option<bool>,
@@ -64,6 +65,7 @@ impl IrcCfg {
     fn conn_from_cfg(&self) -> AatxeConfig {
         AatxeConfig {
             nickname: Some(self.nick.clone()),
+            alt_nicks: self.alt_nicks.clone(),
             server: Some(self.host.clone()),
             port: Some(self.port),
             channels: Some(self.channels.keys().cloned().collect()),
