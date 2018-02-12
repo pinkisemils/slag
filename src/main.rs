@@ -51,7 +51,9 @@ fn logging_conf() -> simplelog::Config {
 
 fn init_logging(log_level: simplelog::LevelFilter) {
     use simplelog::*;
-    TermLogger::init(log_level, logging_conf()).expect("failed to initialize logger");
+    TermLogger::init(log_level, logging_conf())
+        .or_else(|_| SimpleLogger::init(log_level, logging_conf()))
+        .expect("failed to initialize logger");
 }
 
 
