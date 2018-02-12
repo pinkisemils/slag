@@ -19,4 +19,6 @@ slack:
 channels:
     "#freenode": general
 ```
-`irc.use_ssl` is optional.
+Optional options:
+* `irc.use_ssl`, if omitted, defaults to `true`.
+* `irc.pass`, if omitted, the client won't identify with services

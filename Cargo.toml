@@ -13,7 +13,7 @@ native-tls = "0.1"
 serde = "^1.0.8"
 serde_derive = "^1.0.8"
 slack = "0.18.0"
-slack-hook = { git = "ssh://git@github.com/pinkisemils/rust-slack.git", branch = "async_sender"}
+slack-hook = { git = "https://github.com/pinkisemils/rust-slack.git", branch = "async_sender"}
 slack_api = { version = "0.17.0", features = ["reqwest"]  }
 tokio-core = "0.1"
 tokio-io = "0.1"
