@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum SlackMsg {
     OutMsg(PrivMsg),
+    ActionMsg(PrivMsg),
     StatusMsg(PrivMsg),
 }
 

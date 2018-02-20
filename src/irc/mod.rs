@@ -313,17 +313,29 @@ fn handle_irc_msg(irc_msg: AatxeMsg) -> Option<Incoming> {
     }
 }
 
-fn handle_privmsg(nick: String, target: String, msg: String) -> Incoming {
-    Incoming::ForwardMsg(SlackMsg::OutMsg(PrivMsg {
-        chan: target,
-        msg: msg,
-        nick: nick,
-    }))
+fn handle_privmsg(nick: String, target: String, mut msg: String) -> Incoming {
+    let action_preifx = "\x01ACTION";
+    if msg.starts_with(action_preifx) {
+        msg.splice(0..action_preifx.len() + 1, "");
+
+        Incoming::ForwardMsg(SlackMsg::ActionMsg(PrivMsg {
+            chan: target,
+            msg: msg,
+            nick: nick,
+        }))
+    } else {
+        Incoming::ForwardMsg(SlackMsg::OutMsg(PrivMsg {
+            chan: target,
+            msg: msg,
+            nick: nick,
+        }))
+    }
 }
 
 fn handle_slack_msg(slack_msg: SlackMsg) -> Option<AatxeCmd> {
     match slack_msg {
         SlackMsg::OutMsg(m) => try_format_out_msg(m),
+        SlackMsg::ActionMsg(m) => try_format_action_msg(m),
         SlackMsg::StatusMsg(m) => try_format_status_msg(m),
     }
 }
@@ -333,6 +345,10 @@ fn try_format_out_msg(m: PrivMsg) -> Option<AatxeCmd> {
         m.chan,
         format!("[{}]: {}", m.nick, m.msg),
     ))
+}
+
+fn try_format_action_msg(m: PrivMsg) -> Option<AatxeCmd> {
+    Some(AatxeCmd::PRIVMSG(m.chan, format!("[{}] {}", m.nick, m.msg)))
 }
 
 fn try_format_status_msg(m: PrivMsg) -> Option<AatxeCmd> {

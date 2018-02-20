@@ -1,4 +1,5 @@
 #![feature(conservative_impl_trait)]
+#![feature(splice)]
 #![allow(unused_doc_comment)]
 
 extern crate config;

@@ -11,20 +11,19 @@ use futures::Future;
 
 use tokio_core::reactor;
 
-use slack_hook::{Slack, PayloadBuilder, Payload as SlackPayload};
+use slack_hook::{Parse, Payload as SlackPayload, PayloadBuilder, Slack};
 
 use std::collections::HashMap;
 
 use message::{PrivMsg, SlackMsg};
 
-#[derive(Deserialize,Serialize,Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SlackCfg {
     pub secret: String,
     pub hook_url: String,
     #[serde(skip)]
     pub channels: HashMap<String, String>,
 }
-
 
 pub struct SlackReceiver {
     irc_chan: Sender<message::SlackMsg>,
@@ -38,7 +37,6 @@ fn unwrap_chan_mapping(chan: &slack_api::Channel) -> Option<(String, String)> {
     let id = chan.id.as_ref()?.clone();
     let name = chan.name.as_ref()?.clone();
     Some((id, name))
-
 }
 
 fn unwrap_user_mapping(usr: &slack_api::User) -> Option<(String, String)> {
@@ -48,10 +46,11 @@ fn unwrap_user_mapping(usr: &slack_api::User) -> Option<(String, String)> {
 }
 
 impl SlackReceiver {
-    pub fn new(cfg: SlackCfg,
-               irc_chan: Sender<message::SlackMsg>,
-               cli: &slack::RtmClient)
-               -> SlackReceiver {
+    pub fn new(
+        cfg: SlackCfg,
+        irc_chan: Sender<message::SlackMsg>,
+        cli: &slack::RtmClient,
+    ) -> SlackReceiver {
         let resp = cli.start_response();
         let channels = resp.channels
             .as_ref()
@@ -81,7 +80,6 @@ impl SlackReceiver {
         };
     }
 
-
     fn handle_event(&mut self, event: slack::Event) {
         match event {
             Event::Message(msg) => self.handle_msg(*msg),
@@ -96,6 +94,7 @@ impl SlackReceiver {
     }
 
     fn slack_msg_to_privmsg(&mut self, s_msg: slack::Message) -> Option<message::PrivMsg> {
+        // Dirty hax as the first message is always replayed.
         if self.first_msg {
             self.first_msg = false;
             return None;
@@ -110,12 +109,10 @@ impl SlackReceiver {
         let status_messages: Vec<PrivMsg> = self.cfg
             .channels
             .keys()
-            .map(|chan| {
-                PrivMsg {
-                    chan: chan.clone(),
-                    msg: "! DISCONNECTED FROM SLACK !".to_owned(),
-                    nick: "".to_string(),
-                }
+            .map(|chan| PrivMsg {
+                chan: chan.clone(),
+                msg: "! DISCONNECTED FROM SLACK !".to_owned(),
+                nick: "".to_string(),
             })
             .collect();
 
@@ -125,9 +122,9 @@ impl SlackReceiver {
     }
 
     fn std_msg_to_priv(&mut self, std_msg: slack_api::MessageStandard) -> Option<message::PrivMsg> {
-        let nick = std_msg.user
-            .map(|u| self.slack_nick_mappings.get(&u))??;
-        let slack_chan = std_msg.channel
+        let nick = std_msg.user.map(|u| self.slack_nick_mappings.get(&u))??;
+        let slack_chan = std_msg
+            .channel
             .map(|c| self.slack_channel_mappings.get(&c))??;
         let chan = self.cfg.channels.get(slack_chan)?;
         let text = std_msg.text?;
@@ -139,9 +136,6 @@ impl SlackReceiver {
         })
     }
 }
-
-
-
 
 impl slack::EventHandler for SlackReceiver {
     fn on_event(&mut self, _: &slack::RtmClient, event: slack::Event) {
@@ -165,13 +159,19 @@ pub struct SlackSender {
 }
 
 impl SlackSender {
-    pub fn new(sink: Receiver<message::SlackMsg>,
-               cfg: SlackCfg,
-               handle: &reactor::Handle)
-               -> Result<SlackSender, SlagErr> {
+    pub fn new(
+        sink: Receiver<message::SlackMsg>,
+        cfg: SlackCfg,
+        handle: &reactor::Handle,
+    ) -> Result<SlackSender, SlagErr> {
         let slack = Slack::new(cfg.hook_url.as_str(), handle)?;
-        let SlackCfg { channels, hook_url, secret } = cfg;
-        let inverted_chan_map = channels.into_iter()
+        let SlackCfg {
+            channels,
+            hook_url,
+            secret,
+        } = cfg;
+        let inverted_chan_map = channels
+            .into_iter()
             .map(|(slack_chan, irc_chan)| (irc_chan, slack_chan))
             .collect();
         let cfg = SlackCfg {
@@ -184,23 +184,20 @@ impl SlackSender {
             cfg: cfg,
             slack: slack,
         })
-
     }
 
     pub fn process(self, handle: &reactor::Handle) {
         let SlackSender { sink, cfg, slack } = self;
         let work = sink.map_err(|_| ())
-            .filter_map(move |m| {
-                match m {
-                    SlackMsg::OutMsg(pmsg) => {
-                        let msg = SlackSender::try_slack_msg_from_priv(&cfg, pmsg)?;
-                        Some(slack.send(&msg).map_err(|e| {
-                            error!("failed to send to slack: {}", e);
-                            ()
-                        }))
-                    }
-                    _ => None,
-                }
+            .filter_map(move |m| match m {
+                SlackMsg::OutMsg(pmsg) => SlackSender::try_slack_msg_from_priv(&cfg, pmsg),
+                SlackMsg::ActionMsg(pmsg) => SlackSender::try_action_msg_from_priv(&cfg, pmsg),
+                _ => None,
+            })
+            .map(move |payload| {
+                slack
+                    .send(&payload)
+                    .map_err(|e| error!("failed to send to slack: {}", e.description()))
             })
             .buffered(1024)
             .for_each(|_| Ok(()));
@@ -209,14 +206,28 @@ impl SlackSender {
 
     fn try_slack_msg_from_priv(cfg: &SlackCfg, pmsg: PrivMsg) -> Option<SlackPayload> {
         let out_chan = cfg.channels.get(&pmsg.chan)?;
-        if let Ok(msg_payload) = PayloadBuilder::new()
+        PayloadBuilder::new()
             .text(pmsg.msg.clone())
             .channel(out_chan.clone())
             .username(pmsg.nick.clone())
-            .build() {
-            Some(msg_payload)
-        } else {
-            None
-        }
+            .parse(Parse::Full)
+            .build()
+            .ok()
+    }
+
+    fn try_action_msg_from_priv(cfg: &SlackCfg, pmsg: PrivMsg) -> Option<SlackPayload> {
+        use slack_hook::SlackTextContent::Text;
+        let out_chan = cfg.channels.get(&pmsg.chan)?;
+        PayloadBuilder::new()
+            .text(vec![
+                  Text("_".into()),
+                  Text(pmsg.msg.into()),
+                  Text("_".into()),
+            ].as_slice())
+            .channel(out_chan.clone())
+            .username(pmsg.nick.clone())
+            .parse(Parse::Full)
+            .build()
+            .ok()
     }
 }
