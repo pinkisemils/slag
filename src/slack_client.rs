@@ -74,6 +74,19 @@ impl SlackReceiver {
         }
     }
 
+    // hacky shit, pls replace
+    fn split_into_multiple(msg: PrivMsg) -> Vec<PrivMsg> {
+        let PrivMsg{nick, chan, msg} = msg;
+        msg
+            .split('\n')
+            .map(|chunk| PrivMsg {
+                nick: nick.clone(),
+                chan: chan.clone(),
+                msg: chunk.to_owned(),
+            })
+            .collect()
+    }
+
     fn send_irc_msg(&mut self, msg: SlackMsg) {
         if let Err(e) = self.irc_chan.try_send(msg) {
             error!("Failed to send message to irc channel - {:?}", e);
@@ -89,7 +102,9 @@ impl SlackReceiver {
 
     fn handle_msg(&mut self, slack_msg: slack::Message) {
         self.slack_msg_to_privmsg(slack_msg).map(|m| {
-            self.send_irc_msg(SlackMsg::OutMsg(m));
+            for m in Self::split_into_multiple(m) {
+                self.send_irc_msg(SlackMsg::OutMsg(m));
+            }
         });
     }
 
@@ -219,11 +234,7 @@ impl SlackSender {
         use slack_hook::SlackTextContent::Text;
         let out_chan = cfg.channels.get(&pmsg.chan)?;
         PayloadBuilder::new()
-            .text(vec![
-                  Text("_".into()),
-                  Text(pmsg.msg.into()),
-                  Text("_".into()),
-            ].as_slice())
+            .text(vec![Text("_".into()), Text(pmsg.msg.into()), Text("_".into())].as_slice())
             .channel(out_chan.clone())
             .username(pmsg.nick.clone())
             .parse(Parse::Full)
